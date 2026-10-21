@@ -3,7 +3,7 @@
   "appName": "La Llave",
   "webDir": "www",
   "server": {
-    "url": "https://CAMBIA-ESTO-POR-TU-DOMINIO.com/",
+    "url": "https://lallaveac.dioj4582.workers.dev/",
     "cleartext": false
   }
 }
