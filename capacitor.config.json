@@ -1,0 +1,9 @@
+{
+  "appId": "mx.lallave.crm",
+  "appName": "La Llave",
+  "webDir": "www",
+  "server": {
+    "url": "https://CAMBIA-ESTO-POR-TU-DOMINIO.com/",
+    "cleartext": false
+  }
+}
