@@ -35,8 +35,9 @@ public class GpsUploaderPlugin extends Plugin {
             if (supabaseUrl == null || supabaseUrl.isEmpty()
                     || anonKey == null || anonKey.isEmpty()
                     || rowId == null || rowId.isEmpty()
-                    || vehId == null || vehId.isEmpty()) {
-                call.reject("Faltan supabaseUrl, anonKey, rowId o vehId");
+                    || vehId == null || vehId.isEmpty()
+                    || token == null || token.trim().isEmpty()) {
+                call.reject("Faltan supabaseUrl, anonKey, rowId, vehId o token GPS del QR");
                 return;
             }
 
