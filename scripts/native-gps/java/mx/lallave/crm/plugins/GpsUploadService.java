@@ -12,7 +12,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 @CapacitorPlugin(name = "GpsUploader")
-public class GpsUploaderPlugin extends Plugin {
+public class GpsUploadService extends Service {
 
     public static final String PREFS = "llave_gps_uploader";
 
