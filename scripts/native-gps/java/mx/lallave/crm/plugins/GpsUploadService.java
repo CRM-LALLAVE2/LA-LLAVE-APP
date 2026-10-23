@@ -13,6 +13,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
@@ -50,6 +51,7 @@ public class GpsUploadService extends Service {
     private final AtomicBoolean uploading = new AtomicBoolean(false);
     private volatile Location lastLoc;
     private long intervalMs = 15000L;
+    private PowerManager.WakeLock wakeLock; // Control para mantener el CPU despierto
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -101,6 +103,13 @@ public class GpsUploadService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Adquirir o asegurar el WakeLock para evitar que Android suspenda el CPU
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        if (pm != null && (wakeLock == null || !wakeLock.isHeld())) {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LlaveCRM::GpsUploadWakeLock");
+            wakeLock.acquire(10 * 60 * 1000L); // 10 minutos de timeout de seguridad
+        }
+
         SharedPreferences p = prefs();
         int sec = p.getInt("intervalSec", 15);
         if (sec < 10) sec = 10;
@@ -160,13 +169,14 @@ public class GpsUploadService extends Service {
         }
     }
 
-    /**
-     * Envía UN paquete pequeño (~300 bytes) a la función gps_apply de Supabase, que lo mezcla en el servidor.
-     * Ya no se baja ni se reescribe la fila completa (eso fallaba con señal débil y pisaba datos de otros).
-     * Si no hay red, el punto queda en cola real y se manda junto con el siguiente envío que sí pase.
-     */
     private void upload(Location loc, boolean fromCallback) {
         if (!uploading.compareAndSet(false, true)) return;
+        
+        // Renovar el WakeLock en cada ciclo para evitar expiraciones en viajes largos
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.acquire(10 * 60 * 1000L);
+        }
+
         SharedPreferences p = prefs();
         try {
             if (!p.getBoolean("running", false)) {
@@ -207,7 +217,6 @@ public class GpsUploadService extends Service {
             String tripId = p.getString("tripId", "");
             if (!tripId.isEmpty()) {
                 live.put("tripId", tripId);
-                // Puntos en cola (sin red antes) + el actual, en una sola llamada
                 JSONArray points = new JSONArray(p.getString("queue", "[]"));
                 points.put(pointRow(ts, loc.getLatitude(), loc.getLongitude(), speedKmh));
                 JSONObject trip = new JSONObject();
@@ -253,7 +262,6 @@ public class GpsUploadService extends Service {
         return row;
     }
 
-    /** Cola real: se conserva (máx. 300 puntos) y se manda con el próximo envío exitoso. */
     private void enqueueOffline(Location loc) {
         try {
             SharedPreferences p = prefs();
@@ -288,7 +296,7 @@ public class GpsUploadService extends Service {
         os.write(bytes);
         os.close();
         int code = c.getResponseCode();
-        String resp = readBody(c, code >= 200 && code < 300); // leer todo permite reutilizar la conexión (más rápido)
+        String resp = readBody(c, code >= 200 && code < 300);
         if (code < 200 || code >= 300) {
             throw new RuntimeException("RPC " + code + " " + resp);
         }
@@ -312,14 +320,6 @@ public class GpsUploadService extends Service {
         while ((line = br.readLine()) != null) sb.append(line);
         br.close();
         return sb.toString();
-    }
-
-    private static String urlEncode(String s) {
-        try {
-            return java.net.URLEncoder.encode(s, "UTF-8");
-        } catch (Exception e) {
-            return s;
-        }
     }
 
     private void createChannel() {
@@ -356,6 +356,14 @@ public class GpsUploadService extends Service {
             }
         }
         net.shutdownNow();
+
+        // Liberar el WakeLock de forma segura
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try {
+                wakeLock.release();
+            } catch (Exception ignored) {}
+        }
+
         prefs().edit().putBoolean("running", false).apply();
         super.onDestroy();
     }
