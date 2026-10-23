@@ -34,7 +34,7 @@ for (const f of fs.readdirSync(PLUGIN_SRC)) {
   console.log('Copiado', f);
 }
 
-// 2) Dependencia Play Services Location en app/build.gradle
+// 2) Dependencia Play Services Location
 function ensurePlayServices(gradlePath) {
   if (!fs.existsSync(gradlePath)) return false;
   let g = fs.readFileSync(gradlePath, 'utf8');
@@ -77,7 +77,6 @@ extraPerms.forEach((p) => {
     );
   }
 });
-
 if (!mf.includes('GpsUploadService')) {
   const svc = `
         <service
@@ -89,82 +88,24 @@ if (!mf.includes('GpsUploadService')) {
 }
 fs.writeFileSync(MANIFEST, mf);
 
-// 4) Registrar plugin en MainActivity (Java o Kotlin)
+// 4) Registrar plugin en MainActivity ANTES de super.onCreate
 function patchMainActivity(file) {
   if (!fs.existsSync(file)) return false;
   let src = fs.readFileSync(file, 'utf8');
+
   if (src.includes('GpsUploaderPlugin')) {
+    // Si ya estaba DESPUÉS de super.onCreate, lo reordenamos
+    if (/super\.onCreate\([^;]*\);\s*\n\s*registerPlugin\(GpsUploaderPlugin/.test(src)) {
+      src = src.replace(
+        /super\.onCreate\(([^)]*)\);\s*\n\s*registerPlugin\(GpsUploaderPlugin\.class\);/,
+        'registerPlugin(GpsUploaderPlugin.class);\n        super.onCreate($1);'
+      );
+      src = src.replace(
+        /super\.onCreate\(([^)]*)\)\s*\n\s*registerPlugin\(GpsUploaderPlugin::class\.java\)/,
+        'registerPlugin(GpsUploaderPlugin::class.java)\n        super.onCreate($1)'
+      );
+      fs.writeFileSync(file, src);
+      console.log('Reordenado GpsUploaderPlugin ANTES de super.onCreate en', path.basename(file));
+      return true;
+    }
     console.log('GpsUploaderPlugin ya registrado en', path.basename(file));
-    return true;
-  }
-  if (file.endsWith('.java')) {
-    if (!src.includes('import mx.lallave.crm.plugins.GpsUploaderPlugin')) {
-      src = src.replace(
-        /package [^;]+;/,
-        (m) => m + '\n\nimport mx.lallave.crm.plugins.GpsUploaderPlugin;'
-      );
-    }
-    if (src.includes('registerPlugin')) {
-      src = src.replace(
-        /registerPlugin\([^)]+\);/,
-        (m) => m + '\n        registerPlugin(GpsUploaderPlugin.class);'
-      );
-    } else if (src.includes('super.onCreate')) {
-      src = src.replace(
-        /super\.onCreate\([^)]*\);/,
-        (m) => m + '\n        registerPlugin(GpsUploaderPlugin.class);'
-      );
-    } else {
-      return false;
-    }
-  } else if (file.endsWith('.kt')) {
-    if (!src.includes('import mx.lallave.crm.plugins.GpsUploaderPlugin')) {
-      src = src.replace(
-        /package [^\n]+/,
-        (m) => m + '\n\nimport mx.lallave.crm.plugins.GpsUploaderPlugin'
-      );
-    }
-    if (src.includes('registerPlugin')) {
-      src = src.replace(
-        /registerPlugin\([^)]+\)/,
-        (m) => m + '\n        registerPlugin(GpsUploaderPlugin::class.java)'
-      );
-    } else if (src.includes('super.onCreate')) {
-      src = src.replace(
-        /super\.onCreate\([^)]*\)/,
-        (m) => m + '\n        registerPlugin(GpsUploaderPlugin::class.java)'
-      );
-    } else {
-      return false;
-    }
-  }
-  fs.writeFileSync(file, src);
-  console.log('Registrado plugin en', file);
-  return true;
-}
-
-function findMainActivity(dir) {
-  if (!fs.existsSync(dir)) return null;
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const e of entries) {
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      const f = findMainActivity(full);
-      if (f) return f;
-    } else if (e.name === 'MainActivity.java' || e.name === 'MainActivity.kt') {
-      return full;
-    }
-  }
-  return null;
-}
-
-const main = findMainActivity(JAVA_SRC);
-if (main) {
-  if (!patchMainActivity(main)) {
-    console.warn('No se pudo parchear MainActivity automáticamente:', main);
-  }
-} else {
-  console.warn('MainActivity no encontrado; registra GpsUploaderPlugin a mano.');
-}
-
-console.log('inject-native-gps.js listo');
