@@ -215,4 +215,234 @@ public class GpsUploadService extends Service {
             point.put("alias", p.getString("alias", ""));
             point.put("placas", p.getString("placas", ""));
             point.put("driver", p.getString("driver", ""));
-            point.put("passenger", 
+            point.put("passenger", p.getBoolean("passenger", true));
+            String tripId = p.getString("tripId", "");
+            if (!tripId.isEmpty()) {
+                point.put("tripId", tripId);
+            }
+
+            live.put(vehId, point);
+            payload.put("live", live);
+            payload.put("updatedAt", ts);
+
+            if (!tripId.isEmpty()) {
+                appendTripPoint(payload, tripId, vehId, loc, speedKmh, ts);
+            }
+
+            upsertPayload(base, key, rowId, payload);
+
+            p.edit()
+                    .putLong("lastUploadOk", ts)
+                    .putString("lastError", "")
+                    .putInt("pending", 0)
+                    .apply();
+            Log.i(TAG, "OK " + vehId + " " + loc.getLatitude() + "," + loc.getLongitude()
+                    + (fromCallback ? " (cb)" : " (tick)"));
+        } catch (Exception e) {
+            Log.e(TAG, "upload fallo", e);
+            String msg = e.getMessage();
+            if (msg == null) msg = "upload fallo";
+            setErr(msg);
+            enqueueOffline(loc);
+        } finally {
+            uploading.set(false);
+        }
+    }
+
+    private void appendTripPoint(JSONObject payload, String tripId, String vehId,
+                                 Location loc, double speedKmh, long ts) throws Exception {
+        JSONArray trips = payload.optJSONArray("trips");
+        if (trips == null) trips = new JSONArray();
+
+        JSONObject trip = null;
+        int tripIndex = -1;
+        for (int i = 0; i < trips.length(); i++) {
+            JSONObject t = trips.optJSONObject(i);
+            if (t != null && tripId.equals(t.optString("id"))) {
+                trip = t;
+                tripIndex = i;
+                break;
+            }
+        }
+
+        if (trip == null) {
+            trip = new JSONObject();
+            trip.put("id", tripId);
+            trip.put("vehId", vehId);
+            trip.put("startTs", ts);
+            trip.put("endTs", JSONObject.NULL);
+            trip.put("points", new JSONArray());
+            JSONArray next = new JSONArray();
+            next.put(trip);
+            int max = trips.length();
+            if (max > 40) max = 40;
+            for (int i = 0; i < max; i++) {
+                next.put(trips.get(i));
+            }
+            trips = next;
+            tripIndex = 0;
+        }
+
+        JSONArray pts = trip.optJSONArray("points");
+        if (pts == null) pts = new JSONArray();
+        JSONArray row = new JSONArray();
+        row.put(ts);
+        row.put(Math.round(loc.getLatitude() * 1000000.0) / 1000000.0);
+        row.put(Math.round(loc.getLongitude() * 1000000.0) / 1000000.0);
+        row.put((int) Math.round(speedKmh));
+        pts.put(row);
+        trip.put("points", pts);
+
+        if (tripIndex >= 0 && tripIndex < trips.length()) {
+            trips.put(tripIndex, trip);
+        }
+        payload.put("trips", trips);
+    }
+
+    private void enqueueOffline(Location loc) {
+        try {
+            SharedPreferences p = prefs();
+            JSONArray q = new JSONArray(p.getString("queue", "[]"));
+            JSONObject o = new JSONObject();
+            o.put("lat", loc.getLatitude());
+            o.put("lng", loc.getLongitude());
+            double sp = 0;
+            if (loc.hasSpeed()) sp = loc.getSpeed() * 3.6;
+            o.put("speed", sp);
+            o.put("ts", System.currentTimeMillis());
+            q.put(o);
+            JSONArray clipped = new JSONArray();
+            int from = q.length() - 100;
+            if (from < 0) from = 0;
+            for (int i = from; i < q.length(); i++) {
+                clipped.put(q.get(i));
+            }
+            p.edit().putString("queue", clipped.toString()).putInt("pending", clipped.length()).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private JSONObject fetchPayload(String base, String key, String rowId) throws Exception {
+        URL url = new URL(base + "/rest/v1/clientes?id=eq." + urlEncode(rowId) + "&select=payload");
+        HttpURLConnection c = (HttpURLConnection) url.openConnection();
+        c.setRequestMethod("GET");
+        c.setRequestProperty("apikey", key);
+        c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Accept", "application/json");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(20000);
+        int code = c.getResponseCode();
+        String body = readBody(c, code >= 200 && code < 300);
+        c.disconnect();
+        if (code < 200 || code >= 300) {
+            throw new RuntimeException("GET " + code + " " + body);
+        }
+        JSONArray arr = new JSONArray(body);
+        if (arr.length() == 0) return new JSONObject();
+        JSONObject row = arr.getJSONObject(0);
+        if (row.isNull("payload")) return new JSONObject();
+        Object pl = row.get("payload");
+        if (pl instanceof JSONObject) return (JSONObject) pl;
+        return new JSONObject(String.valueOf(pl));
+    }
+
+    private void upsertPayload(String base, String key, String rowId, JSONObject payload) throws Exception {
+        JSONArray body = new JSONArray();
+        JSONObject row = new JSONObject();
+        row.put("id", rowId);
+        row.put("payload", payload);
+        body.put(row);
+        URL url = new URL(base + "/rest/v1/clientes?on_conflict=id");
+        HttpURLConnection c = (HttpURLConnection) url.openConnection();
+        c.setRequestMethod("POST");
+        c.setDoOutput(true);
+        c.setRequestProperty("apikey", key);
+        c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setRequestProperty("Prefer", "resolution=merge-duplicates,return=minimal");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(20000);
+        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        c.setFixedLengthStreamingMode(bytes.length);
+        OutputStream os = c.getOutputStream();
+        os.write(bytes);
+        os.close();
+        int code = c.getResponseCode();
+        String resp = readBody(c, code >= 200 && code < 300);
+        c.disconnect();
+        if (code < 200 || code >= 300) {
+            throw new RuntimeException("POST " + code + " " + resp);
+        }
+    }
+
+    private void setErr(String msg) {
+        prefs().edit().putString("lastError", msg == null ? "" : msg).apply();
+    }
+
+    private SharedPreferences prefs() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+    }
+
+    private static String readBody(HttpURLConnection c, boolean ok) throws Exception {
+        BufferedReader br = new BufferedReader(new InputStreamReader(
+                ok ? c.getInputStream()
+                        : (c.getErrorStream() != null ? c.getErrorStream() : c.getInputStream()),
+                StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = br.readLine()) != null) sb.append(line);
+        br.close();
+        return sb.toString();
+    }
+
+    private static String urlEncode(String s) {
+        try {
+            return java.net.URLEncoder.encode(s, "UTF-8");
+        } catch (Exception e) {
+            return s;
+        }
+    }
+
+    private void createChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        NotificationChannel ch = new NotificationChannel(
+                CHANNEL_ID, "La Llave GPS", NotificationManager.IMPORTANCE_LOW);
+        ch.setDescription("Seguimiento de vehiculo en ruta");
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.createNotificationChannel(ch);
+    }
+
+    private Notification buildNotification(String text) {
+        Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        PendingIntent pi = PendingIntent.getActivity(
+                this, 0, open != null ? open : new Intent(),
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("La Llave · GPS activo")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                .setContentIntent(pi)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build();
+    }
+
+    @Override
+    public void onDestroy() {
+        handler.removeCallbacks(tick);
+        if (fused != null && callback != null) {
+            try {
+                fused.removeLocationUpdates(callback);
+            } catch (Exception ignored) {
+            }
+        }
+        net.shutdownNow();
+        prefs().edit().putBoolean("running", false).apply();
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}
