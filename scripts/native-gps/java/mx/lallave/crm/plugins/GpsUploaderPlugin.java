@@ -37,7 +37,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class GpsUploadService extends Service {
+@CapacitorPlugin(name = "GpsUploader")
+public class GpsUploaderPlugin extends Plugin {
     private static final String TAG = "LlaveGpsUpload";
     private static final String CHANNEL_ID = "llave_gps_upload";
     private static final String PREFS_NAME = "llave_gps_uploader";
