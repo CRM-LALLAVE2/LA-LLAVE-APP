@@ -60,7 +60,11 @@ public class GpsUploadService extends Service {
                 return;
             }
             final Location loc = lastLoc;
-            if (loc != null) {
+            boolean recentOk = System.currentTimeMillis() - p.getLong("lastUploadOk", 0) < intervalMs - 2000
+                    && p.getInt("pending", 0) == 0;
+            if (loc != null && recentOk) {
+                // ya se envió hace poco: nada que hacer en este ciclo
+            } else if (loc != null) {
                 net.execute(new Runnable() {
                     @Override
                     public void run() {
@@ -156,17 +160,11 @@ public class GpsUploadService extends Service {
         }
     }
 
-    /** Prefs primero; si vacío, conserva lo que ya había en el punto del CRM. */
-    private static String mergeStr(SharedPreferences p, String key, JSONObject point, String field) {
-        String fromPrefs = p.getString(key, "");
-        if (fromPrefs != null && !fromPrefs.isEmpty()) return fromPrefs;
-        if (point != null) {
-            String fromPoint = point.optString(field, "");
-            if (fromPoint != null && !fromPoint.isEmpty()) return fromPoint;
-        }
-        return "";
-    }
-
+    /**
+     * Envía UN paquete pequeño (~300 bytes) a la función gps_apply de Supabase, que lo mezcla en el servidor.
+     * Ya no se baja ni se reescribe la fila completa (eso fallaba con señal débil y pisaba datos de otros).
+     * Si no hay red, el punto queda en cola real y se manda junto con el siguiente envío que sí pase.
+     */
     private void upload(Location loc, boolean fromCallback) {
         if (!uploading.compareAndSet(false, true)) return;
         SharedPreferences p = prefs();
@@ -179,27 +177,15 @@ public class GpsUploadService extends Service {
             String key = p.getString("anonKey", "");
             String rowId = p.getString("rowId", "");
             String vehId = p.getString("vehId", "");
-            if (base.isEmpty() || key.isEmpty() || rowId.isEmpty() || vehId.isEmpty()) {
-                setErr("Config incompleta (url/key/rowId/vehId)");
+            String token = p.getString("token", "");
+            if (base.isEmpty() || key.isEmpty() || rowId.isEmpty() || vehId.isEmpty() || token.isEmpty()) {
+                setErr("Config incompleta (url/key/rowId/vehId/token)");
                 return;
             }
-
-            JSONObject payload = fetchPayload(base, key, rowId);
-            if (payload == null) payload = new JSONObject();
-            payload.put("id", rowId);
-            payload.put("tipoRegistro", "gps_flota");
-            if (!payload.has("sucursal")) {
-                String sid = "llave2";
-                if (rowId.startsWith("gps_track_")) {
-                    sid = rowId.substring("gps_track_".length());
-                }
-                payload.put("sucursal", sid);
+            String sid = "llave2";
+            if (rowId.startsWith("gps_track_")) {
+                sid = rowId.substring("gps_track_".length());
             }
-
-            JSONObject live = payload.optJSONObject("live");
-            if (live == null) live = new JSONObject();
-            JSONObject point = live.optJSONObject(vehId);
-            if (point == null) point = new JSONObject();
 
             long ts = System.currentTimeMillis();
             double speedKmh = 0;
@@ -207,128 +193,76 @@ public class GpsUploadService extends Service {
                 speedKmh = loc.getSpeed() * 3.6;
             }
 
-            // Ubicación siempre del GPS nativo
-            point.put("lat", loc.getLatitude());
-            point.put("lng", loc.getLongitude());
-            point.put("speed", speedKmh);
-            if (loc.hasAccuracy()) {
-                point.put("accuracy", (double) loc.getAccuracy());
-            } else {
-                point.put("accuracy", JSONObject.NULL);
-            }
-            if (loc.hasBearing()) {
-                point.put("heading", (double) loc.getBearing());
-            } else {
-                point.put("heading", JSONObject.NULL);
-            }
-            point.put("ts", ts);
-            point.put("seen", ts);
-            point.put("active", true);
+            JSONObject live = new JSONObject();
+            live.put("lat", loc.getLatitude());
+            live.put("lng", loc.getLongitude());
+            live.put("speed", speedKmh);
+            live.put("accuracy", loc.hasAccuracy() ? (Object) Double.valueOf(loc.getAccuracy()) : JSONObject.NULL);
+            live.put("heading", loc.hasBearing() ? (Object) Double.valueOf(loc.getBearing()) : JSONObject.NULL);
+            live.put("ts", ts);
+            live.put("seen", ts);
+            live.put("active", true);
 
-            // No pisar nombre/alias/placas si prefs vienen vacías
-            point.put("alias", mergeStr(p, "alias", point, "alias"));
-            point.put("placas", mergeStr(p, "placas", point, "placas"));
-            point.put("driver", mergeStr(p, "driver", point, "driver"));
-            point.put("passenger", p.getBoolean("passenger", point.optBoolean("passenger", true)));
-
-            String tripId = mergeStr(p, "tripId", point, "tripId");
+            JSONObject patch = new JSONObject();
+            String tripId = p.getString("tripId", "");
             if (!tripId.isEmpty()) {
-                point.put("tripId", tripId);
+                live.put("tripId", tripId);
+                // Puntos en cola (sin red antes) + el actual, en una sola llamada
+                JSONArray points = new JSONArray(p.getString("queue", "[]"));
+                points.put(pointRow(ts, loc.getLatitude(), loc.getLongitude(), speedKmh));
+                JSONObject trip = new JSONObject();
+                trip.put("id", tripId);
+                trip.put("startTs", ts);
+                trip.put("points", points);
+                patch.put("trip", trip);
             }
+            patch.put("live", live);
 
-            live.put(vehId, point);
-            payload.put("live", live);
-            payload.put("updatedAt", ts);
-
-            if (!tripId.isEmpty()) {
-                appendTripPoint(payload, tripId, vehId, loc, speedKmh, ts);
-            }
-
-            upsertPayload(base, key, rowId, payload);
+            JSONObject args = new JSONObject();
+            args.put("p_sid", sid);
+            args.put("p_veh", vehId);
+            args.put("p_token", token);
+            args.put("p", patch);
+            callRpc(base, key, "gps_apply", args);
 
             p.edit()
                     .putLong("lastUploadOk", ts)
                     .putString("lastError", "")
+                    .putString("queue", "[]")
                     .putInt("pending", 0)
                     .apply();
-            Log.i(TAG, "OK " + vehId + " driver=" + point.optString("driver", "")
-                    + " " + loc.getLatitude() + "," + loc.getLongitude()
+            Log.i(TAG, "OK " + vehId + " " + loc.getLatitude() + "," + loc.getLongitude()
                     + (fromCallback ? " (cb)" : " (tick)"));
         } catch (Exception e) {
             Log.e(TAG, "upload fallo", e);
             String msg = e.getMessage();
             if (msg == null) msg = "upload fallo";
-            setErr(msg);
+            setErr(msg.length() > 160 ? msg.substring(0, 160) : msg);
             enqueueOffline(loc);
         } finally {
             uploading.set(false);
         }
     }
 
-    private void appendTripPoint(JSONObject payload, String tripId, String vehId,
-                                 Location loc, double speedKmh, long ts) throws Exception {
-        JSONArray trips = payload.optJSONArray("trips");
-        if (trips == null) trips = new JSONArray();
-
-        JSONObject trip = null;
-        int tripIndex = -1;
-        for (int i = 0; i < trips.length(); i++) {
-            JSONObject t = trips.optJSONObject(i);
-            if (t != null && tripId.equals(t.optString("id"))) {
-                trip = t;
-                tripIndex = i;
-                break;
-            }
-        }
-
-        if (trip == null) {
-            trip = new JSONObject();
-            trip.put("id", tripId);
-            trip.put("vehId", vehId);
-            trip.put("startTs", ts);
-            trip.put("endTs", JSONObject.NULL);
-            trip.put("points", new JSONArray());
-            JSONArray next = new JSONArray();
-            next.put(trip);
-            int max = trips.length();
-            if (max > 40) max = 40;
-            for (int i = 0; i < max; i++) {
-                next.put(trips.get(i));
-            }
-            trips = next;
-            tripIndex = 0;
-        }
-
-        JSONArray pts = trip.optJSONArray("points");
-        if (pts == null) pts = new JSONArray();
+    private static JSONArray pointRow(long ts, double lat, double lng, double speedKmh) throws Exception {
         JSONArray row = new JSONArray();
         row.put(ts);
-        row.put(Math.round(loc.getLatitude() * 1000000.0) / 1000000.0);
-        row.put(Math.round(loc.getLongitude() * 1000000.0) / 1000000.0);
+        row.put(Math.round(lat * 1000000.0) / 1000000.0);
+        row.put(Math.round(lng * 1000000.0) / 1000000.0);
         row.put((int) Math.round(speedKmh));
-        pts.put(row);
-        trip.put("points", pts);
-
-        if (tripIndex >= 0 && tripIndex < trips.length()) {
-            trips.put(tripIndex, trip);
-        }
-        payload.put("trips", trips);
+        return row;
     }
 
+    /** Cola real: se conserva (máx. 300 puntos) y se manda con el próximo envío exitoso. */
     private void enqueueOffline(Location loc) {
         try {
             SharedPreferences p = prefs();
             JSONArray q = new JSONArray(p.getString("queue", "[]"));
-            JSONObject o = new JSONObject();
-            o.put("lat", loc.getLatitude());
-            o.put("lng", loc.getLongitude());
             double sp = 0;
-            if (loc.hasSpeed()) sp = loc.getSpeed() * 3.6;
-            o.put("speed", sp);
-            o.put("ts", System.currentTimeMillis());
-            q.put(o);
+            if (loc.hasSpeed() && loc.getSpeed() >= 0) sp = loc.getSpeed() * 3.6;
+            q.put(pointRow(System.currentTimeMillis(), loc.getLatitude(), loc.getLongitude(), sp));
             JSONArray clipped = new JSONArray();
-            int from = q.length() - 100;
+            int from = q.length() - 300;
             if (from < 0) from = 0;
             for (int i = from; i < q.length(); i++) {
                 clipped.put(q.get(i));
@@ -338,56 +272,25 @@ public class GpsUploadService extends Service {
         }
     }
 
-    private JSONObject fetchPayload(String base, String key, String rowId) throws Exception {
-        URL url = new URL(base + "/rest/v1/clientes?id=eq." + urlEncode(rowId) + "&select=payload");
-        HttpURLConnection c = (HttpURLConnection) url.openConnection();
-        c.setRequestMethod("GET");
-        c.setRequestProperty("apikey", key);
-        c.setRequestProperty("Authorization", "Bearer " + key);
-        c.setRequestProperty("Accept", "application/json");
-        c.setConnectTimeout(20000);
-        c.setReadTimeout(20000);
-        int code = c.getResponseCode();
-        String body = readBody(c, code >= 200 && code < 300);
-        c.disconnect();
-        if (code < 200 || code >= 300) {
-            throw new RuntimeException("GET " + code + " " + body);
-        }
-        JSONArray arr = new JSONArray(body);
-        if (arr.length() == 0) return new JSONObject();
-        JSONObject row = arr.getJSONObject(0);
-        if (row.isNull("payload")) return new JSONObject();
-        Object pl = row.get("payload");
-        if (pl instanceof JSONObject) return (JSONObject) pl;
-        return new JSONObject(String.valueOf(pl));
-    }
-
-    private void upsertPayload(String base, String key, String rowId, JSONObject payload) throws Exception {
-        JSONArray body = new JSONArray();
-        JSONObject row = new JSONObject();
-        row.put("id", rowId);
-        row.put("payload", payload);
-        body.put(row);
-        URL url = new URL(base + "/rest/v1/clientes?on_conflict=id");
+    private void callRpc(String base, String key, String fn, JSONObject args) throws Exception {
+        URL url = new URL(base + "/rest/v1/rpc/" + fn);
         HttpURLConnection c = (HttpURLConnection) url.openConnection();
         c.setRequestMethod("POST");
         c.setDoOutput(true);
         c.setRequestProperty("apikey", key);
         c.setRequestProperty("Authorization", "Bearer " + key);
         c.setRequestProperty("Content-Type", "application/json");
-        c.setRequestProperty("Prefer", "resolution=merge-duplicates,return=minimal");
-        c.setConnectTimeout(20000);
-        c.setReadTimeout(20000);
-        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(15000);
+        byte[] bytes = args.toString().getBytes(StandardCharsets.UTF_8);
         c.setFixedLengthStreamingMode(bytes.length);
         OutputStream os = c.getOutputStream();
         os.write(bytes);
         os.close();
         int code = c.getResponseCode();
-        String resp = readBody(c, code >= 200 && code < 300);
-        c.disconnect();
+        String resp = readBody(c, code >= 200 && code < 300); // leer todo permite reutilizar la conexión (más rápido)
         if (code < 200 || code >= 300) {
-            throw new RuntimeException("POST " + code + " " + resp);
+            throw new RuntimeException("RPC " + code + " " + resp);
         }
     }
 
