@@ -156,6 +156,17 @@ public class GpsUploadService extends Service {
         }
     }
 
+    /** Prefs primero; si vacío, conserva lo que ya había en el punto del CRM. */
+    private static String mergeStr(SharedPreferences p, String key, JSONObject point, String field) {
+        String fromPrefs = p.getString(key, "");
+        if (fromPrefs != null && !fromPrefs.isEmpty()) return fromPrefs;
+        if (point != null) {
+            String fromPoint = point.optString(field, "");
+            if (fromPoint != null && !fromPoint.isEmpty()) return fromPoint;
+        }
+        return "";
+    }
+
     private void upload(Location loc, boolean fromCallback) {
         if (!uploading.compareAndSet(false, true)) return;
         SharedPreferences p = prefs();
@@ -196,6 +207,7 @@ public class GpsUploadService extends Service {
                 speedKmh = loc.getSpeed() * 3.6;
             }
 
+            // Ubicación siempre del GPS nativo
             point.put("lat", loc.getLatitude());
             point.put("lng", loc.getLongitude());
             point.put("speed", speedKmh);
@@ -212,11 +224,14 @@ public class GpsUploadService extends Service {
             point.put("ts", ts);
             point.put("seen", ts);
             point.put("active", true);
-            point.put("alias", p.getString("alias", ""));
-            point.put("placas", p.getString("placas", ""));
-            point.put("driver", p.getString("driver", ""));
-            point.put("passenger", p.getBoolean("passenger", true));
-            String tripId = p.getString("tripId", "");
+
+            // No pisar nombre/alias/placas si prefs vienen vacías
+            point.put("alias", mergeStr(p, "alias", point, "alias"));
+            point.put("placas", mergeStr(p, "placas", point, "placas"));
+            point.put("driver", mergeStr(p, "driver", point, "driver"));
+            point.put("passenger", p.getBoolean("passenger", point.optBoolean("passenger", true)));
+
+            String tripId = mergeStr(p, "tripId", point, "tripId");
             if (!tripId.isEmpty()) {
                 point.put("tripId", tripId);
             }
@@ -236,7 +251,8 @@ public class GpsUploadService extends Service {
                     .putString("lastError", "")
                     .putInt("pending", 0)
                     .apply();
-            Log.i(TAG, "OK " + vehId + " " + loc.getLatitude() + "," + loc.getLongitude()
+            Log.i(TAG, "OK " + vehId + " driver=" + point.optString("driver", "")
+                    + " " + loc.getLatitude() + "," + loc.getLongitude()
                     + (fromCallback ? " (cb)" : " (tick)"));
         } catch (Exception e) {
             Log.e(TAG, "upload fallo", e);
