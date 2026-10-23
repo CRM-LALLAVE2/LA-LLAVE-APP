@@ -225,12 +225,17 @@ public class GpsUploadService extends Service {
             args.put("p", patch);
             callRpc(base, key, "gps_apply", args);
 
-            p.edit()
+            // No vaciar la cola mientras no exista un viaje activo.
+            // Si el GPS sube la posición en vivo antes de que la app asigne tripId,
+            // los puntos pendientes deben sobrevivir para enviarse cuando el viaje comience.
+            SharedPreferences.Editor saved = p.edit()
                     .putLong("lastUploadOk", ts)
-                    .putString("lastError", "")
-                    .putString("queue", "[]")
-                    .putInt("pending", 0)
-                    .apply();
+                    .putString("lastError", "");
+            if (!tripId.isEmpty()) {
+                saved.putString("queue", "[]")
+                     .putInt("pending", 0);
+            }
+            saved.apply();
             Log.i(TAG, "OK " + vehId + " " + loc.getLatitude() + "," + loc.getLongitude()
                     + (fromCallback ? " (cb)" : " (tick)"));
         } catch (Exception e) {
