@@ -6,9 +6,11 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.location.Location;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -212,6 +214,19 @@ public class GpsUploadService extends Service {
             live.put("ts", ts);
             live.put("seen", ts);
             live.put("active", true);
+            // Bateria desde el servicio nativo: la pagina (JS) se congela en segundo plano y no puede reportarla
+            try {
+                Intent bi = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                if (bi != null) {
+                    int lvl = bi.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                    int scale = bi.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+                    if (lvl >= 0 && scale > 0) {
+                        live.put("battery", Math.round(lvl * 100f / scale));
+                        int st = bi.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                        live.put("charging", st == BatteryManager.BATTERY_STATUS_CHARGING || st == BatteryManager.BATTERY_STATUS_FULL);
+                    }
+                }
+            } catch (Exception ignore) { }
 
             JSONObject patch = new JSONObject();
             String tripId = p.getString("tripId", "");
