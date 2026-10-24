@@ -36,6 +36,11 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -45,6 +50,10 @@ public class GpsUploadService extends Service {
     private static final String CHANNEL_ID = "llave_gps_upload";
     private static final String PREFS_NAME = "llave_gps_uploader";
     private static final int NOTIF_ID = 4242;
+    private static final String DEFAULT_NOTIFY_URL = "https://lallave-sms.dioj4582.workers.dev/";
+    private static volatile JSONObject pubCache;
+    private static volatile long pubTs;
+    private static volatile String pubSid = "";
 
     private FusedLocationProviderClient fused;
     private LocationCallback callback;
@@ -242,6 +251,28 @@ public class GpsUploadService extends Service {
             }
             patch.put("live", live);
 
+            // Alertas de velocidad y zonas calculadas aqui (no dependen de la pagina, que se congela en segundo plano)
+            JSONArray alerts = new JSONArray();
+            JSONArray events = new JSONArray();
+            JSONObject zonesNext = new JSONObject();
+            long lastSpeedNext = p.getLong("lastSpeedAlert", 0);
+            boolean alertsOk = false;
+            try {
+                lastSpeedNext = buildAlerts(p, base, key, sid, vehId, loc, speedKmh, ts, alerts, events, zonesNext);
+                alertsOk = true;
+            } catch (Exception ex) {
+                Log.w(TAG, "alertas: " + ex.getMessage());
+            }
+            if (alertsOk) {
+                if (alerts.length() > 0) patch.put("alerts", alerts);
+                if (events.length() > 0) patch.put("events", events);
+                JSONObject zone = new JSONObject();
+                zone.put("zones", zonesNext);
+                zone.put("lastSpeedAlert", lastSpeedNext);
+                zone.put("signalOk", true);
+                patch.put("zone", zone);
+            }
+
             JSONObject args = new JSONObject();
             args.put("p_sid", sid);
             args.put("p_veh", vehId);
@@ -255,11 +286,15 @@ public class GpsUploadService extends Service {
             SharedPreferences.Editor saved = p.edit()
                     .putLong("lastUploadOk", ts)
                     .putString("lastError", "");
+            if (alertsOk) {
+                saved.putString("zones", zonesNext.toString()).putLong("lastSpeedAlert", lastSpeedNext);
+            }
             if (!tripId.isEmpty()) {
                 saved.putString("queue", "[]")
                      .putInt("pending", 0);
             }
             saved.apply();
+            if (alertsOk && alerts.length() > 0) notifyAdmins(p, sid, vehId, token, alerts);
             Log.i(TAG, "OK " + vehId + " " + loc.getLatitude() + "," + loc.getLongitude()
                     + (fromCallback ? " (cb)" : " (tick)"));
         } catch (Exception e) {
@@ -270,6 +305,243 @@ public class GpsUploadService extends Service {
             enqueueOffline(loc);
         } finally {
             uploading.set(false);
+        }
+    }
+
+    private static String last3(String v) {
+        return v.length() > 3 ? v.substring(v.length() - 3) : v;
+    }
+
+    private static String fmtNum(double d) {
+        return d == Math.rint(d) ? String.valueOf((long) d) : String.valueOf(d);
+    }
+
+    /** Devuelve el nuevo lastSpeedAlert; llena alerts/events y zonesOut. No guarda nada (se guarda tras subir con exito). */
+    private long buildAlerts(SharedPreferences p, String base, String key, String sid, String vehId,
+                             Location loc, double speedKmh, long ts,
+                             JSONArray alerts, JSONArray events, JSONObject zonesOut) throws Exception {
+        JSONObject pub = loadPublic(base, key, sid, p);
+        JSONObject cfg = pub != null ? pub.optJSONObject("config") : null;
+        if (cfg == null) cfg = new JSONObject();
+
+        double limit = 90;
+        JSONObject byVeh = cfg.optJSONObject("speedByVeh");
+        double lv = byVeh != null ? byVeh.optDouble(vehId, 0) : 0;
+        if (lv > 0) {
+            limit = lv;
+        } else {
+            double g = cfg.optDouble("speedLimit", 0);
+            if (g > 0) limit = g;
+        }
+        boolean speedEnabled = !(cfg.has("speedEnabled") && !cfg.isNull("speedEnabled") && !cfg.optBoolean("speedEnabled", true));
+        double cm = cfg.optDouble("speedCooldownMin", 5);
+        if (!(cm > 0)) cm = 5;
+        if (cm < 1) cm = 1;
+        long coolMs = (long) (cm * 60000);
+
+        List<AlertEngine.Geo> geos = new ArrayList<AlertEngine.Geo>();
+        JSONArray ga = pub != null ? pub.optJSONArray("geofences") : null;
+        if (ga != null) {
+            for (int i = 0; i < ga.length(); i++) {
+                JSONObject g = ga.optJSONObject(i);
+                if (g == null) continue;
+                if (g.has("active") && !g.isNull("active") && !g.optBoolean("active", true)) continue;
+                JSONArray vids = g.optJSONArray("vehIds");
+                if (vids != null && vids.length() > 0) {
+                    boolean match = false;
+                    for (int j = 0; j < vids.length(); j++) {
+                        if (vehId.equals(String.valueOf(vids.opt(j)))) match = true;
+                    }
+                    if (!match) continue;
+                }
+                AlertEngine.Geo geo = new AlertEngine.Geo();
+                geo.id = g.optString("id", "");
+                geo.name = g.optString("name", "");
+                geo.lat = g.optDouble("lat", 0);
+                geo.lng = g.optDouble("lng", 0);
+                geo.radiusM = g.optDouble("radiusM", 0);
+                Object ae = g.opt("alertEnter");
+                Object ax = g.opt("alertExit");
+                geo.enterNotFalse = !(ae instanceof Boolean && !((Boolean) ae).booleanValue());
+                geo.enterTruthy = g.optBoolean("alertEnter", false);
+                geo.exitNotFalse = !(ax instanceof Boolean && !((Boolean) ax).booleanValue());
+                geos.add(geo);
+            }
+        }
+
+        Map<String, Boolean> zones = new HashMap<String, Boolean>();
+        JSONObject zsPrev = new JSONObject(p.getString("zones", "{}"));
+        Iterator<String> it = zsPrev.keys();
+        while (it.hasNext()) {
+            String k = it.next();
+            zones.put(k, zsPrev.optBoolean(k, false));
+        }
+
+        AlertEngine.Result r = AlertEngine.eval(loc.getLatitude(), loc.getLongitude(), speedKmh, ts,
+                limit, speedEnabled, coolMs, geos, zones, p.getLong("lastSpeedAlert", 0));
+
+        String alias = p.getString("alias", "");
+        String placas = p.getString("placas", "");
+        String vehName = !alias.isEmpty() ? alias : (!placas.isEmpty() ? placas : "Veh\u00edculo");
+        String sfx = last3(vehId);
+        String t36 = Long.toString(ts, 36);
+        String tripId = p.getString("tripId", "");
+
+        for (AlertEngine.Item item : r.items) {
+            if ("speed".equals(item.kind)) {
+                JSONObject a = new JSONObject();
+                a.put("id", "a_" + t36 + "_sp" + sfx);
+                a.put("type", "speed");
+                a.put("severity", "danger");
+                a.put("vehId", vehId);
+                a.put("vehName", vehName);
+                a.put("msg", "Exceso de velocidad: " + Math.round(item.speed) + " km/h (l\u00edmite " + fmtNum(item.limit) + ")");
+                a.put("speed", Math.round(item.speed));
+                a.put("limit", item.limit);
+                a.put("lat", loc.getLatitude());
+                a.put("lng", loc.getLongitude());
+                a.put("ts", ts);
+                alerts.put(a);
+                continue;
+            }
+            String gname = item.geoName.isEmpty() ? "zona" : item.geoName;
+            if ("enter".equals(item.kind) || "exit".equals(item.kind)) {
+                boolean enter = "enter".equals(item.kind);
+                JSONObject a = new JSONObject();
+                a.put("id", "a_" + t36 + (enter ? "_e" : "_x") + last3(item.geoId) + sfx);
+                a.put("type", item.kind);
+                a.put("severity", enter ? "info" : "danger");
+                a.put("vehId", vehId);
+                a.put("vehName", vehName);
+                a.put("geoId", item.geoId);
+                a.put("geoName", item.geoName);
+                a.put("msg", (enter ? "Entr\u00f3 a " : "Sali\u00f3 de ") + gname);
+                a.put("lat", loc.getLatitude());
+                a.put("lng", loc.getLongitude());
+                a.put("ts", ts);
+                alerts.put(a);
+            }
+            if (item.breach) {
+                JSONObject e = new JSONObject();
+                e.put("id", "e_" + t36 + "_GE" + sfx);
+                e.put("kind", "GEOFENCE_BREACH");
+                e.put("vehId", vehId);
+                e.put("vehName", vehName);
+                e.put("driver", p.getString("driver", ""));
+                e.put("tripId", tripId.isEmpty() ? JSONObject.NULL : tripId);
+                e.put("ts", ts);
+                e.put("lat", loc.getLatitude());
+                e.put("lng", loc.getLongitude());
+                e.put("speed", Math.round(speedKmh));
+                e.put("passenger", p.getBoolean("passenger", true));
+                e.put("geoId", item.geoId);
+                e.put("geoName", item.geoName);
+                e.put("direction", item.direction);
+                e.put("risk", "LOW");
+                events.put(e);
+            }
+        }
+        for (Map.Entry<String, Boolean> en : zones.entrySet()) {
+            zonesOut.put(en.getKey(), en.getValue().booleanValue());
+        }
+        return r.lastSpeedAlert;
+    }
+
+    /** Config del CRM (limite de velocidad y zonas): fila gps_public_<sid>, se refresca cada 2 min. */
+    private JSONObject loadPublic(String base, String key, String sid, SharedPreferences p) {
+        long now = System.currentTimeMillis();
+        if (pubCache != null && sid.equals(pubSid) && now - pubTs < 120000L) return pubCache;
+        try {
+            URL url = new URL(base + "/rest/v1/clientes?select=payload&id=eq.gps_public_" + sid);
+            HttpURLConnection c = (HttpURLConnection) url.openConnection();
+            c.setRequestMethod("GET");
+            c.setRequestProperty("apikey", key);
+            c.setRequestProperty("Authorization", "Bearer " + key);
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(10000);
+            int code = c.getResponseCode();
+            String body = readBody(c, code >= 200 && code < 300);
+            if (code >= 200 && code < 300) {
+                JSONArray arr = new JSONArray(body);
+                if (arr.length() > 0) {
+                    JSONObject pl = arr.getJSONObject(0).optJSONObject("payload");
+                    if (pl != null) {
+                        pubCache = pl;
+                        pubTs = now;
+                        pubSid = sid;
+                        p.edit().putString("pubJson", pl.toString()).apply();
+                        return pl;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "config publica: " + e.getMessage());
+        }
+        if (pubCache != null && sid.equals(pubSid)) {
+            pubTs = now - 100000L; // reintentar pronto
+            return pubCache;
+        }
+        try {
+            String saved = p.getString("pubJson", "");
+            if (!saved.isEmpty()) return new JSONObject(saved);
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** Avisa al Worker de SMS (mismo formato que la pagina). Solo velocidad y salida de zona. */
+    private void notifyAdmins(SharedPreferences p, String sid, String vehId, String token, JSONArray alerts) {
+        try {
+            String u = p.getString("notifyUrl", "");
+            if (u.isEmpty()) u = DEFAULT_NOTIFY_URL;
+            JSONArray items = new JSONArray();
+            for (int i = 0; i < alerts.length() && items.length() < 3; i++) {
+                JSONObject a = alerts.optJSONObject(i);
+                if (a == null) continue;
+                String t = a.optString("type", "");
+                if (!"speed".equals(t) && !"exit".equals(t)) continue;
+                JSONObject o = new JSONObject();
+                o.put("type", t);
+                o.put("risk", "");
+                o.put("vehName", a.optString("vehName", ""));
+                o.put("msg", a.optString("msg", ""));
+                o.put("lat", a.opt("lat"));
+                o.put("lng", a.opt("lng"));
+                o.put("ts", a.opt("ts"));
+                items.put(o);
+            }
+            if (items.length() == 0) return;
+            JSONObject body = new JSONObject();
+            body.put("s", sid);
+            body.put("v", vehId);
+            body.put("t", token);
+            body.put("alerts", items);
+            final String target = u;
+            final byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        HttpURLConnection c = (HttpURLConnection) new URL(target).openConnection();
+                        c.setRequestMethod("POST");
+                        c.setDoOutput(true);
+                        c.setRequestProperty("Content-Type", "text/plain");
+                        c.setConnectTimeout(10000);
+                        c.setReadTimeout(10000);
+                        c.setFixedLengthStreamingMode(bytes.length);
+                        OutputStream os = c.getOutputStream();
+                        os.write(bytes);
+                        os.close();
+                        int code = c.getResponseCode();
+                        readBody(c, code >= 200 && code < 300);
+                        c.disconnect();
+                    } catch (Exception e) {
+                        Log.w(TAG, "sms: " + e.getMessage());
+                    }
+                }
+            }).start();
+        } catch (Exception e) {
+            Log.w(TAG, "notify: " + e.getMessage());
         }
     }
 

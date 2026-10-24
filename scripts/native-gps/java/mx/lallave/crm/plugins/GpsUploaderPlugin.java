@@ -28,6 +28,7 @@ public class GpsUploaderPlugin extends Plugin {
             String placas = call.getString("placas", "");
             String driver = call.getString("driver", "");
             String tripId = call.getString("tripId", "");
+            String notifyUrl = call.getString("notifyUrl", "");
             boolean passenger = call.getBoolean("passenger", true);
             int intervalSec = call.getInt("intervalSec", 15);
             if (intervalSec < 10) intervalSec = 10;
@@ -44,6 +45,16 @@ public class GpsUploaderPlugin extends Plugin {
             SharedPreferences.Editor ed = getContext()
                     .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .edit();
+            SharedPreferences old = getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            String prevTrip = old.getString("alertTrip", "");
+            String newTrip = tripId != null ? tripId : "";
+            if (!newTrip.equals(prevTrip)) {
+                // viaje nuevo: se reinicia el estado de zonas y el enfriamiento de alertas de velocidad
+                ed.remove("zones");
+                ed.remove("lastSpeedAlert");
+                ed.putString("alertTrip", newTrip);
+            }
+            ed.putString("notifyUrl", notifyUrl != null ? notifyUrl : "");
             ed.putBoolean("running", true);
             ed.putString("supabaseUrl", supabaseUrl);
             ed.putString("anonKey", anonKey);
