@@ -92,19 +92,22 @@ if (!mf.includes('GpsUploadService')) {
   console.log('Registrado GpsUploadService en Manifest');
 }
 
-if (!mf.includes('SmsLocateReceiver')) {
-  const rcv =
-    '\n        <receiver\n' +
-    '            android:name="mx.lallave.crm.plugins.SmsLocateReceiver"\n' +
-    '            android:exported="true"\n' +
-    '            android:permission="android.permission.BROADCAST_SMS">\n' +
-    '            <intent-filter android:priority="999">\n' +
-    '                <action android:name="android.provider.Telephony.SMS_RECEIVED" />\n' +
-    '            </intent-filter>\n' +
-    '        </receiver>';
-  mf = mf.replace('</application>', rcv + '\n    </application>');
-  console.log('Registrado SmsLocateReceiver en Manifest');
+// Keep receiver registration consistent with patch-android.js and replace stale entries.
+const smsReceiver =
+  '\n        <receiver\n' +
+  '            android:name="mx.lallave.crm.plugins.SmsLocateReceiver"\n' +
+  '            android:exported="true">\n' +
+  '            <intent-filter android:priority="999">\n' +
+  '                <action android:name="android.provider.Telephony.SMS_RECEIVED" />\n' +
+  '            </intent-filter>\n' +
+  '        </receiver>';
+const smsReceiverPattern = /<receiver\b(?=[^>]*android:name="mx\.lallave\.crm\.plugins\.SmsLocateReceiver")[\s\S]*?<\/receiver>/;
+if (smsReceiverPattern.test(mf)) {
+  mf = mf.replace(smsReceiverPattern, smsReceiver.trim());
+} else {
+  mf = mf.replace('</application>', smsReceiver + '\n    </application>');
 }
+console.log('SmsLocateReceiver verificado en Manifest');
 if (!mf.includes('android.hardware.telephony')) {
   mf = mf.replace('<application', '<uses-feature android:name="android.hardware.telephony" android:required="false"/>\n    <application');
 }
