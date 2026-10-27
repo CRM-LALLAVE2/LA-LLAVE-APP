@@ -33,3 +33,11 @@ Si cambias de dominio: edita `server.url`, `npm run sync`, genera un APK nuevo.
   Si ves huecos en la ruta, cámbialo a «Siempre» y pon la batería en «Sin restricciones».
 - Opcional más adelante: Android App Links (archivo `assetlinks.json`) para que el QR abra la app sin
   ningún toque extra.
+
+## Respaldo por SMS ("LA LLAVE")
+Si al telefono del chofer llega un SMS que dice exactamente `LA LLAVE` (sin importar mayusculas/espacios),
+la app responde por SMS con la ubicacion actual (enlace de Google Maps). Funciona con la pantalla bloqueada.
+- Permisos SMS: la app los pide la primera vez que el chofer inicia el GPS (aceptar "Enviar y ver SMS").
+- Android 13+ (APK instalado fuera de Play Store): si no responde, Ajustes > Apps > La Llave > menu (⋮) > "Permitir ajustes restringidos".
+- Opcional: limitar quien puede pedir la ubicacion con `GpsUploader.setSmsConfig({numbers:['6861234567']})`.
+- Maximo 1 respuesta cada 30 s. Cada respuesta es un SMS que cuesta del saldo del telefono del chofer.

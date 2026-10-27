@@ -3,7 +3,11 @@ package mx.lallave.crm.plugins;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.os.Build;
+import androidx.core.app.ActivityCompat;
+import org.json.JSONArray;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -16,9 +20,54 @@ public class GpsUploaderPlugin extends Plugin {
 
     public static final String PREFS = "llave_gps_uploader";
 
+    private boolean smsGranted() {
+        Context c = getContext();
+        return c.checkSelfPermission(Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+                && c.checkSelfPermission(Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void askSms() {
+        try {
+            if (!smsGranted() && getActivity() != null) {
+                ActivityCompat.requestPermissions(getActivity(),
+                        new String[]{Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS}, 7311);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /** Pide permiso de SMS (respaldo "LA LLAVE"). */
+    @PluginMethod
+    public void requestSmsPermission(PluginCall call) {
+        askSms();
+        JSObject r = new JSObject();
+        r.put("granted", smsGranted());
+        call.resolve(r);
+    }
+
+    /** Configura palabra secreta y numeros autorizados: {keyword?, numbers?: []} */
+    @PluginMethod
+    public void setSmsConfig(PluginCall call) {
+        SharedPreferences.Editor e = getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit();
+        String kw = call.getString("keyword");
+        if (kw != null && !kw.trim().isEmpty()) e.putString("smsKeyword", kw.trim());
+        try {
+            JSONArray a = call.getArray("numbers");
+            if (a != null) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < a.length(); i++) { if (i > 0) sb.append(','); sb.append(a.getString(i)); }
+                e.putString("smsAllowed", sb.toString());
+            }
+        } catch (Exception ignored) {}
+        e.apply();
+        JSObject r = new JSObject(); r.put("ok", true); r.put("granted", smsGranted());
+        call.resolve(r);
+    }
+
     @PluginMethod
     public void start(PluginCall call) {
         try {
+            SharedPreferences sp0 = getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            if (!sp0.getBoolean("smsAsked", false)) { sp0.edit().putBoolean("smsAsked", true).apply(); askSms(); }
             String supabaseUrl = call.getString("supabaseUrl", "");
             String anonKey = call.getString("anonKey", "");
             String rowId = call.getString("rowId", "");
@@ -114,6 +163,7 @@ public class GpsUploaderPlugin extends Plugin {
         ret.put("lastUploadOk", p.getLong("lastUploadOk", 0));
         ret.put("pending", p.getInt("pending", 0));
         ret.put("lastError", p.getString("lastError", ""));
+        ret.put("smsGranted", smsGranted());
         call.resolve(ret);
     }
 }

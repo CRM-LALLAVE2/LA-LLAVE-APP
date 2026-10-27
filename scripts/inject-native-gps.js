@@ -68,6 +68,8 @@ const extraPerms = [
   'FOREGROUND_SERVICE_LOCATION',
   'POST_NOTIFICATIONS',
   'WAKE_LOCK',
+  'RECEIVE_SMS',
+  'SEND_SMS',
   'INTERNET'
 ];
 
@@ -88,6 +90,23 @@ if (!mf.includes('GpsUploadService')) {
     '            android:foregroundServiceType="location" />';
   mf = mf.replace('</application>', svc + '\n    </application>');
   console.log('Registrado GpsUploadService en Manifest');
+}
+
+if (!mf.includes('SmsLocateReceiver')) {
+  const rcv =
+    '\n        <receiver\n' +
+    '            android:name="mx.lallave.crm.plugins.SmsLocateReceiver"\n' +
+    '            android:exported="true"\n' +
+    '            android:permission="android.permission.BROADCAST_SMS">\n' +
+    '            <intent-filter android:priority="999">\n' +
+    '                <action android:name="android.provider.Telephony.SMS_RECEIVED" />\n' +
+    '            </intent-filter>\n' +
+    '        </receiver>';
+  mf = mf.replace('</application>', rcv + '\n    </application>');
+  console.log('Registrado SmsLocateReceiver en Manifest');
+}
+if (!mf.includes('android.hardware.telephony')) {
+  mf = mf.replace('<application', '<uses-feature android:name="android.hardware.telephony" android:required="false"/>\n    <application');
 }
 
 fs.writeFileSync(MANIFEST, mf);
