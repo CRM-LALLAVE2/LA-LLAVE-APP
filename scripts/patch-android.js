@@ -56,7 +56,11 @@ const receiverTag = `
             </intent-filter>
         </receiver>`;
 
-if (!x.includes('mx.lallave.crm.plugins.SmsLocateReceiver')) {
+// Normalize the receiver every time so stale/incomplete manifest entries cannot survive.
+const receiverPattern = /<receiver\b(?=[^>]*android:name="mx\.lallave\.crm\.plugins\.SmsLocateReceiver")[\s\S]*?<\/receiver>/;
+if (receiverPattern.test(x)) {
+  x = x.replace(receiverPattern, receiverTag.trim());
+} else {
   x = x.replace('</application>', `${receiverTag}\n    </application>`);
 }
 
