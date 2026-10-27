@@ -105,6 +105,7 @@ public class GpsUploaderPlugin extends Plugin {
             }
             ed.putString("notifyUrl", notifyUrl != null ? notifyUrl : "");
             ed.putBoolean("running", true);
+            ed.putBoolean("wantRun", true);
             ed.putString("supabaseUrl", supabaseUrl);
             ed.putString("anonKey", anonKey);
             ed.putString("rowId", rowId);
@@ -141,6 +142,7 @@ public class GpsUploaderPlugin extends Plugin {
                     .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .edit()
                     .putBoolean("running", false)
+                    .putBoolean("wantRun", false)
                     .apply();
 
             Intent i = new Intent(getContext(), GpsUploadService.class);
@@ -151,6 +153,47 @@ public class GpsUploaderPlugin extends Plugin {
             call.resolve(ret);
         } catch (Exception e) {
             call.reject("No se pudo detener GpsUploader: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * SOS: manda un SMS a los contactos de emergencia definidos en el CRM (funciona SIN internet).
+     * Parametros: {lat?, lng?, accuracy?, driver?, vehicle?}
+     */
+    @PluginMethod
+    public void sendSosSms(PluginCall call) {
+        JSObject r = new JSObject();
+        try {
+            SharedPreferences sp = getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            JSONArray contacts = new JSONArray(sp.getString("sosContacts", "[]"));
+            String alias = call.getString("vehicle", sp.getString("alias", ""));
+            String driver = call.getString("driver", sp.getString("driver", ""));
+            Double lat = call.getDouble("lat");
+            Double lng = call.getDouble("lng");
+            StringBuilder sb = new StringBuilder("EMERGENCIA SOS - La Llave\n");
+            sb.append(driver == null || driver.isEmpty() ? "El chofer" : driver);
+            if (alias != null && !alias.isEmpty()) sb.append(" (").append(alias).append(")");
+            sb.append(" pidio ayuda.");
+            if (lat != null && lng != null && !(lat == 0 && lng == 0)) {
+                sb.append("\nUbicacion: https://maps.google.com/?q=").append(lat).append(",").append(lng);
+            } else {
+                sb.append("\nUbicacion no disponible.");
+            }
+            sb.append("\nLlamar de inmediato.");
+            int sent = 0, total = 0;
+            for (int i = 0; i < contacts.length(); i++) {
+                String ph = contacts.optJSONObject(i) != null ? contacts.optJSONObject(i).optString("phone", "") : contacts.optString(i, "");
+                ph = ph.replaceAll("[^+0-9]", "");
+                if (ph.length() < 7) continue;
+                total++;
+                if (SmsCommands.sendSms(getContext(), ph, sb.toString())) sent++;
+            }
+            r.put("sent", sent);
+            r.put("total", total);
+            r.put("smsGranted", smsGranted());
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("sendSosSms: " + e.getMessage(), e);
         }
     }
 

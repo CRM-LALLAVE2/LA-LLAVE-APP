@@ -82,6 +82,14 @@ public class SmsLocateReceiver extends BroadcastReceiver {
         if (sender == null) return;
 
         String receivedText = norm(body.toString());
+
+        // Comandos de administrador (ESTADO GPS / REACTIVAR GPS). "LA LLAVE" sigue igual mas abajo.
+        String cmd = receivedText.equals(keyword) ? null : SmsCommands.match(receivedText);
+        if (cmd != null) {
+            SmsCommands.handle(context.getApplicationContext(), cmd, sender, goAsync());
+            return;
+        }
+
         if (!receivedText.equals(keyword)) {
             Log.d(TAG, "SMS ignorado. Esperado: '" + keyword + "' | Recibido: '" + receivedText + "'");
             return;

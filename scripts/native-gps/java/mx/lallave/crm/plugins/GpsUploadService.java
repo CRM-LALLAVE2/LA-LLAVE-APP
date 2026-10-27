@@ -50,6 +50,8 @@ public class GpsUploadService extends Service {
     private static final String CHANNEL_ID = "llave_gps_upload";
     private static final String PREFS_NAME = "llave_gps_uploader";
     private static final int NOTIF_ID = 4242;
+    /** True mientras el servicio de rastreo esta vivo en este proceso (lo lee el comando SMS ESTADO/REACTIVAR GPS). */
+    static volatile boolean RUNNING = false;
     private static final String DEFAULT_NOTIFY_URL = "https://lallave-sms.dioj4582.workers.dev/";
     private static volatile JSONObject pubCache;
     private static volatile long pubTs;
@@ -95,6 +97,13 @@ public class GpsUploadService extends Service {
                                     upload(l, false);
                                 }
                             });
+                        } else {
+                            net.execute(new Runnable() {
+                                @Override
+                                public void run() {
+                                    heartbeatOnly();
+                                }
+                            });
                         }
                     });
                 } catch (SecurityException e) {
@@ -109,6 +118,7 @@ public class GpsUploadService extends Service {
     public void onCreate() {
         super.onCreate();
         fused = LocationServices.getFusedLocationProviderClient(this);
+        RUNNING = true;
         createChannel();
     }
 
@@ -162,6 +172,7 @@ public class GpsUploadService extends Service {
                 final Location loc = result.getLastLocation();
                 if (loc == null) return;
                 lastLoc = loc;
+                prefs().edit().putLong("lastFix", loc.getTime() > 0 ? loc.getTime() : System.currentTimeMillis()).apply();
                 net.execute(new Runnable() {
                     @Override
                     public void run() {
@@ -223,6 +234,7 @@ public class GpsUploadService extends Service {
             live.put("ts", ts);
             live.put("seen", ts);
             live.put("active", true);
+            addHealth(live, p, ts, loc.getTime());
             // Bateria desde el servicio nativo: la pagina (JS) se congela en segundo plano y no puede reportarla
             try {
                 Intent bi = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
@@ -306,6 +318,86 @@ public class GpsUploadService extends Service {
         } finally {
             uploading.set(false);
         }
+    }
+
+    /** Salud del telefono para el vigilante del dashboard: hora del ultimo fix GPS, ubicacion encendida, cola, error. */
+    private void addHealth(JSONObject live, SharedPreferences p, long hb, long fixTime) {
+        try {
+            live.put("hb", hb);
+            live.put("fix", fixTime > 0 ? fixTime : p.getLong("lastFix", 0));
+            live.put("locOn", locationEnabled());
+            live.put("pend", p.getInt("pending", 0));
+            String err = p.getString("lastError", "");
+            live.put("err", err == null ? "" : (err.length() > 60 ? err.substring(0, 60) : err));
+            live.put("nat", true);
+        } catch (Exception ignored) { }
+    }
+
+    private boolean locationEnabled() {
+        try {
+            android.location.LocationManager lm = (android.location.LocationManager) getSystemService(LOCATION_SERVICE);
+            if (lm == null) return false;
+            if (Build.VERSION.SDK_INT >= 28) return lm.isLocationEnabled();
+            return lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+                    || lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
+        } catch (Exception e) { return false; }
+    }
+
+    /** Sin ninguna posicion disponible: manda solo el latido para que el dashboard sepa que la app sigue viva. */
+    private void heartbeatOnly() {
+        if (!uploading.compareAndSet(false, true)) return;
+        SharedPreferences p = prefs();
+        try {
+            String base = p.getString("supabaseUrl", ""), key = p.getString("anonKey", "");
+            String rowId = p.getString("rowId", ""), vehId = p.getString("vehId", ""), token = p.getString("token", "");
+            if (base.isEmpty() || key.isEmpty() || rowId.isEmpty() || vehId.isEmpty() || token.isEmpty()) return;
+            String sid = rowId.startsWith("gps_track_") ? rowId.substring("gps_track_".length()) : "llave2";
+            JSONObject live = new JSONObject();
+            long ts = System.currentTimeMillis();
+            addHealth(live, p, ts, 0);
+            live.put("nofix", true);
+            try {
+                Intent bi = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                if (bi != null) {
+                    int lvl = bi.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), scale = bi.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+                    if (lvl >= 0 && scale > 0) live.put("battery", Math.round(lvl * 100f / scale));
+                }
+            } catch (Exception ignore) { }
+            JSONObject patch = new JSONObject();
+            patch.put("live", live);
+            JSONObject args = new JSONObject();
+            args.put("p_sid", sid); args.put("p_veh", vehId); args.put("p_token", token); args.put("p", patch);
+            callRpc(base, key, "gps_apply", args);
+            p.edit().putLong("lastHb", ts).putString("lastError", "").apply();
+        } catch (Exception e) {
+            String m = e.getMessage();
+            setErr(m == null ? "latido fallo" : (m.length() > 160 ? m.substring(0, 160) : m));
+        } finally {
+            uploading.set(false);
+        }
+    }
+
+    /** Guarda en prefs los numeros autorizados (SMS) y contactos SOS que el administrador definio en el CRM. */
+    private void applyPublicConfig(JSONObject pl, SharedPreferences p) {
+        try {
+            JSONObject cfg = pl.optJSONObject("config");
+            if (cfg == null) return;
+            SharedPreferences.Editor e = p.edit();
+            JSONArray admins = cfg.optJSONArray("adminPhones");
+            if (admins != null) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < admins.length(); i++) {
+                    String n = admins.optString(i, "").trim();
+                    if (n.isEmpty()) continue;
+                    if (sb.length() > 0) sb.append(',');
+                    sb.append(n);
+                }
+                e.putString("smsAdmins", sb.toString());
+            }
+            JSONArray sos = cfg.optJSONArray("sosContacts");
+            if (sos != null) e.putString("sosContacts", sos.toString());
+            e.apply();
+        } catch (Exception ignored) { }
     }
 
     private static String last3(String v) {
@@ -470,6 +562,7 @@ public class GpsUploadService extends Service {
                         pubTs = now;
                         pubSid = sid;
                         p.edit().putString("pubJson", pl.toString()).apply();
+                        applyPublicConfig(pl, p);
                         return pl;
                     }
                 }
@@ -656,6 +749,7 @@ public class GpsUploadService extends Service {
             } catch (Exception ignored) {}
         }
 
+        RUNNING = false;
         prefs().edit().putBoolean("running", false).apply();
         super.onDestroy();
     }
