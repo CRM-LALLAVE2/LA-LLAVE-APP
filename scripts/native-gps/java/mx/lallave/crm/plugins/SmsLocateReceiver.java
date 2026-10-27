@@ -1,6 +1,7 @@
 package mx.lallave.crm.plugins;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -16,9 +17,9 @@ import android.os.Looper;
 import android.provider.Telephony;
 import android.telephony.SmsManager;
 import android.telephony.SmsMessage;
+import android.util.Log;
 
 import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -30,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class SmsLocateReceiver extends BroadcastReceiver {
 
+    private static final String TAG = "SmsLocateReceiver";
     private static final String PREFS = GpsUploaderPlugin.PREFS;
     private static final String DEFAULT_KEYWORD = "LA LLAVE";
     private static final long FIX_TIMEOUT_MS = 20000;
@@ -59,6 +61,7 @@ public class SmsLocateReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(final Context context, Intent intent) {
         if (intent == null || !Telephony.Sms.Intents.SMS_RECEIVED_ACTION.equals(intent.getAction())) return;
+        
         SmsMessage[] msgs = Telephony.Sms.Intents.getMessagesFromIntent(intent);
         if (msgs == null || msgs.length == 0) return;
 
@@ -75,26 +78,44 @@ public class SmsLocateReceiver extends BroadcastReceiver {
             if (sender == null) sender = m.getDisplayOriginatingAddress();
             if (m.getDisplayMessageBody() != null) body.append(m.getDisplayMessageBody());
         }
-        if (sender == null || !norm(body.toString()).equals(keyword)) return;
-        if (!allowed(allowed, sender)) return;
+
+        if (sender == null) return;
+
+        String receivedText = norm(body.toString());
+        if (!receivedText.equals(keyword)) {
+            Log.d(TAG, "SMS ignorado. Esperado: '" + keyword + "' | Recibido: '" + receivedText + "'");
+            return;
+        }
+
+        if (!allowed(allowed, sender)) {
+            Log.w(TAG, "SMS descartado: remitente no autorizado (" + sender + ")");
+            return;
+        }
 
         long now = System.currentTimeMillis();
         long last = prefs.getLong("smsLastReply", 0);
-        if (now - last < MIN_GAP_MS) return;
+        if (now - last < MIN_GAP_MS) {
+            Log.w(TAG, "SMS ignorado por limite de tiempo (gap < 30s)");
+            return;
+        }
+
         prefs.edit().putLong("smsLastReply", now).putString("smsLastSender", sender).apply();
 
         final PendingResult pr = goAsync();
         reply(context.getApplicationContext(), sender, pr);
     }
 
+    @SuppressLint("MissingPermission")
     private void reply(final Context ctx, final String sender, final PendingResult pr) {
         final AtomicBoolean done = new AtomicBoolean(false);
         final Handler handler = new Handler(Looper.getMainLooper());
         final LocationManager lm = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
 
+        // Validacion de permisos de ubicacion
         if (lm == null || (ctx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
                 && ctx.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED)) {
-            send(ctx, sender, "La Llave: el telefono no tiene permiso de ubicacion.");
+            Log.e(TAG, "Sin permisos de ubicacion otorgados.");
+            send(ctx, sender, "La Llave: el telefono no tiene permiso de ubicacion otorgado.");
             pr.finish();
             return;
         }
@@ -107,29 +128,38 @@ public class SmsLocateReceiver extends BroadcastReceiver {
                 if (l == null) continue;
                 if (best == null || l.getTime() > best.getTime()) best = l;
             }
-        } catch (SecurityException ignored) {}
+        } catch (SecurityException e) {
+            Log.e(TAG, "Error al leer lastKnownLocation", e);
+        }
         final Location fallback = best;
 
         final LocationListener[] holder = new LocationListener[1];
-        final Runnable finish = new Runnable() {
+        final Runnable finishListener = new Runnable() {
             @Override public void run() {
-                try { if (holder[0] != null) lm.removeUpdates(holder[0]); } catch (Exception ignored) {}
+                try {
+                    if (holder[0] != null) lm.removeUpdates(holder[0]);
+                } catch (Exception ignored) {}
             }
         };
+
         final Runnable timeout = new Runnable() {
             @Override public void run() {
                 if (!done.compareAndSet(false, true)) return;
-                finish.run();
-                if (fallback != null) sendLoc(ctx, sender, fallback, true);
-                else send(ctx, sender, "La Llave: no se pudo obtener la ubicacion (sin senal GPS).");
+                finishListener.run();
+                if (fallback != null) {
+                    sendLoc(ctx, sender, fallback, true);
+                } else {
+                    send(ctx, sender, "La Llave: tiempo de espera agotado sin senal GPS.");
+                }
                 pr.finish();
             }
         };
+
         holder[0] = new LocationListener() {
             @Override public void onLocationChanged(Location location) {
                 if (!done.compareAndSet(false, true)) return;
                 handler.removeCallbacks(timeout);
-                finish.run();
+                finishListener.run();
                 sendLoc(ctx, sender, location, false);
                 pr.finish();
             }
@@ -140,29 +170,41 @@ public class SmsLocateReceiver extends BroadcastReceiver {
 
         try {
             boolean requested = false;
+            // Usar requestLocationUpdates en lugar del deprecado requestSingleUpdate
             if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                lm.requestSingleUpdate(LocationManager.GPS_PROVIDER, holder[0], Looper.getMainLooper());
+                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, holder[0], Looper.getMainLooper());
                 requested = true;
             }
             if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                lm.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, holder[0], Looper.getMainLooper());
+                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 0f, holder[0], Looper.getMainLooper());
                 requested = true;
             }
+
             if (!requested) {
                 if (done.compareAndSet(false, true)) {
-                    if (fallback != null) sendLoc(ctx, sender, fallback, true);
-                    else send(ctx, sender, "La Llave: la ubicacion (GPS) esta apagada en el telefono.");
+                    if (fallback != null) {
+                        sendLoc(ctx, sender, fallback, true);
+                    } else {
+                        send(ctx, sender, "La Llave: la ubicacion (GPS) esta apagada en el telefono.");
+                    }
                     pr.finish();
                 }
                 return;
             }
         } catch (Exception e) {
+            Log.e(TAG, "Error solicitando updates al LocationManager", e);
             if (done.compareAndSet(false, true)) {
-                if (fallback != null) sendLoc(ctx, sender, fallback, true);
+                finishListener.run();
+                if (fallback != null) {
+                    sendLoc(ctx, sender, fallback, true);
+                } else {
+                    send(ctx, sender, "La Llave: error al activar los sensores GPS.");
+                }
                 pr.finish();
             }
             return;
         }
+
         handler.postDelayed(timeout, FIX_TIMEOUT_MS);
     }
 
@@ -180,13 +222,33 @@ public class SmsLocateReceiver extends BroadcastReceiver {
     @SuppressWarnings("deprecation")
     private void send(Context ctx, String to, String text) {
         try {
-            SmsManager sm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                    ? ctx.getSystemService(SmsManager.class) : SmsManager.getDefault();
+            if (ctx.checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+                Log.e(TAG, "No se puede responder: Falta permiso SEND_SMS.");
+                return;
+            }
+
+            SmsManager sm = null;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                sm = ctx.getSystemService(SmsManager.class);
+            }
+            if (sm == null) {
+                sm = SmsManager.getDefault();
+            }
+
+            if (sm == null) {
+                Log.e(TAG, "SmsManager no esta disponible en este dispositivo.");
+                return;
+            }
+
             ArrayList<String> parts = sm.divideMessage(text);
-            if (parts.size() > 1) sm.sendMultipartTextMessage(to, null, parts, null, null);
-            else sm.sendTextMessage(to, null, text, null, null);
-        } catch (Exception ignored) {
-            // sin saldo / sin permiso SEND_SMS
+            if (parts.size() > 1) {
+                sm.sendMultipartTextMessage(to, null, parts, null, null);
+            } else {
+                sm.sendTextMessage(to, null, text, null, null);
+            }
+            Log.d(TAG, "SMS enviado con exito a: " + to);
+        } catch (Exception e) {
+            Log.e(TAG, "Fallo al enviar SMS (verifique saldo o permisos): " + e.getMessage(), e);
         }
     }
 }
