@@ -165,21 +165,25 @@ public class GpsUploaderPlugin extends Plugin {
         JSObject r = new JSObject();
         try {
             SharedPreferences sp = getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            JSONArray contacts = new JSONArray(sp.getString("sosContacts", "[]"));
+            JSONArray contacts = call.getArray("contacts");
+            if (contacts == null || contacts.length() == 0) contacts = new JSONArray(sp.getString("sosContacts", "[]"));
+            boolean cancel = call.getBoolean("cancel", false);
             String alias = call.getString("vehicle", sp.getString("alias", ""));
             String driver = call.getString("driver", sp.getString("driver", ""));
             Double lat = call.getDouble("lat");
             Double lng = call.getDouble("lng");
-            StringBuilder sb = new StringBuilder("EMERGENCIA SOS - La Llave\n");
+            StringBuilder sb = new StringBuilder(cancel ? "SOS CANCELADO - La Llave\n" : "EMERGENCIA SOS - La Llave\n");
             sb.append(driver == null || driver.isEmpty() ? "El chofer" : driver);
             if (alias != null && !alias.isEmpty()) sb.append(" (").append(alias).append(")");
-            sb.append(" pidio ayuda.");
-            if (lat != null && lng != null && !(lat == 0 && lng == 0)) {
+            sb.append(cancel ? " aviso que fue una falsa alarma. No hay emergencia." : " pidio ayuda.");
+            if (cancel) {
+                // sin ubicacion ni llamada urgente
+            } else if (lat != null && lng != null && !(lat == 0 && lng == 0)) {
                 sb.append("\nUbicacion: https://maps.google.com/?q=").append(lat).append(",").append(lng);
             } else {
                 sb.append("\nUbicacion no disponible.");
             }
-            sb.append("\nLlamar de inmediato.");
+            if (!cancel) sb.append("\nLlamar de inmediato.");
             int sent = 0, total = 0;
             for (int i = 0; i < contacts.length(); i++) {
                 String ph = contacts.optJSONObject(i) != null ? contacts.optJSONObject(i).optString("phone", "") : contacts.optString(i, "");

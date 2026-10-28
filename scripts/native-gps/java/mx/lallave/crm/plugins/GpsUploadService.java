@@ -395,7 +395,23 @@ public class GpsUploadService extends Service {
                 e.putString("smsAdmins", sb.toString());
             }
             JSONArray sos = cfg.optJSONArray("sosContacts");
-            if (sos != null) e.putString("sosContacts", sos.toString());
+            if (sos != null && sos.length() > 0) {
+                e.putString("sosContacts", sos.toString());
+            } else if (admins != null && admins.length() > 0) {
+                // Sin contactos de emergencia propios: el SOS avisa a los administradores
+                JSONArray fb = new JSONArray();
+                for (int i = 0; i < admins.length(); i++) {
+                    String n = admins.optString(i, "").trim();
+                    if (n.isEmpty()) continue;
+                    JSONObject o = new JSONObject();
+                    o.put("name", "Administracion");
+                    o.put("phone", n);
+                    fb.put(o);
+                }
+                e.putString("sosContacts", fb.toString());
+            } else if (sos != null) {
+                e.putString("sosContacts", "[]");
+            }
             e.apply();
         } catch (Exception ignored) { }
     }
