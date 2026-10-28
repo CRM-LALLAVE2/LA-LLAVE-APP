@@ -93,6 +93,11 @@ public class SmsLocateReceiver extends BroadcastReceiver {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String keyword = prefs.getString("smsKeyword", DEFAULT_KEYWORD);
         String allowed = prefs.getString("smsAllowed", "");
+        // Telefonos de administrador definidos en el CRM (si no hay ninguna lista, se acepta cualquiera como antes)
+        String admins = prefs.getString("smsAdmins", "");
+        if (admins != null && !admins.trim().isEmpty()) {
+            allowed = (allowed == null || allowed.trim().isEmpty()) ? admins : allowed + "," + admins;
+        }
 
         String sender = null;
         StringBuilder body = new StringBuilder();
