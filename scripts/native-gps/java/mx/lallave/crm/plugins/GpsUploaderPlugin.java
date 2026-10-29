@@ -106,6 +106,7 @@ public class GpsUploaderPlugin extends Plugin {
             ed.putString("notifyUrl", notifyUrl != null ? notifyUrl : "");
             ed.putBoolean("running", true);
             ed.putBoolean("wantRun", true);
+            ed.putBoolean("auto", call.getBoolean("auto", true));
             ed.putString("supabaseUrl", supabaseUrl);
             ed.putString("anonKey", anonKey);
             ed.putString("rowId", rowId);
@@ -214,6 +215,71 @@ public class GpsUploaderPlugin extends Plugin {
             else sm.sendTextMessage(to, null, text, null, null);
             return true;
         } catch (Exception e) { return false; }
+    }
+
+    /** Estado de la configuracion del telefono para el asistente de la app. */
+    @PluginMethod
+    public void getSetupStatus(PluginCall call) {
+        JSObject r = new JSObject();
+        Context c = getContext();
+        r.put("fine", c.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED);
+        r.put("background", Build.VERSION.SDK_INT < 29
+                || c.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED);
+        r.put("notifications", Build.VERSION.SDK_INT < 33
+                || c.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED);
+        r.put("sms", smsGranted());
+        boolean batt = true;
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) c.getSystemService(Context.POWER_SERVICE);
+            if (pm != null && Build.VERSION.SDK_INT >= 23) batt = pm.isIgnoringBatteryOptimizations(c.getPackageName());
+        } catch (Exception ignored) {}
+        r.put("battery", batt);
+        boolean loc = true;
+        try {
+            android.location.LocationManager lm = (android.location.LocationManager) c.getSystemService(Context.LOCATION_SERVICE);
+            if (lm != null) loc = Build.VERSION.SDK_INT >= 28 ? lm.isLocationEnabled()
+                    : lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER);
+        } catch (Exception ignored) {}
+        r.put("locationOn", loc);
+        SharedPreferences sp = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        r.put("auto", sp.getBoolean("auto", false));
+        r.put("wantRun", sp.getBoolean("wantRun", false));
+        call.resolve(r);
+    }
+
+    /** Abre la pantalla de Ajustes correcta o pide el permiso: what = location | background | notifications | sms | battery | gps */
+    @PluginMethod
+    public void fixSetup(PluginCall call) {
+        String what = call.getString("what", "");
+        Context c = getContext();
+        try {
+            if ("location".equals(what) && getActivity() != null) {
+                ActivityCompat.requestPermissions(getActivity(),
+                        new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, 7312);
+            } else if ("notifications".equals(what) && Build.VERSION.SDK_INT >= 33 && getActivity() != null) {
+                ActivityCompat.requestPermissions(getActivity(), new String[]{Manifest.permission.POST_NOTIFICATIONS}, 7313);
+            } else if ("sms".equals(what)) {
+                askSms();
+            } else if ("battery".equals(what) && Build.VERSION.SDK_INT >= 23) {
+                Intent i = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        android.net.Uri.parse("package:" + c.getPackageName()));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try { c.startActivity(i); } catch (Exception e) {
+                    Intent j = new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                    j.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); c.startActivity(j);
+                }
+            } else if ("gps".equals(what)) {
+                Intent i = new Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); c.startActivity(i);
+            } else { // background / cualquier otro: ajustes de la app (ahi se elige "Permitir todo el tiempo")
+                Intent i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.parse("package:" + c.getPackageName()));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); c.startActivity(i);
+            }
+            JSObject r = new JSObject(); r.put("ok", true); call.resolve(r);
+        } catch (Exception e) {
+            call.reject("fixSetup: " + e.getMessage(), e);
+        }
     }
 
     @PluginMethod

@@ -149,6 +149,13 @@ public class GpsUploadService extends Service {
         return START_STICKY;
     }
 
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // El chofer deslizo la app de recientes: el servicio sigue (foreground). Si el sistema lo detiene, START_STICKY lo reinicia.
+        Log.i(TAG, "app quitada de recientes; el rastreo continua");
+        super.onTaskRemoved(rootIntent);
+    }
+
     private void startUpdates() {
         if (callback != null) {
             try {
@@ -225,6 +232,34 @@ public class GpsUploadService extends Service {
                 speedKmh = loc.getSpeed() * 3.6;
             }
 
+            // Viajes automaticos: inicia con movimiento, termina tras 10 min parado; sin viaje solo 1 envio cada 2 min
+            String autoTripId = null;
+            String endTripId = null;
+            long endTripTs = 0;
+            if (p.getBoolean("auto", false)) {
+                String cur = p.getString("tripId", "");
+                int hits = AutoTrip.nextHits(p.getInt("moveHits", 0), speedKmh);
+                long lastMove = p.getLong("lastMove", 0);
+                if (AutoTrip.isMoving(speedKmh)) lastMove = ts;
+                int act = AutoTrip.action(!cur.isEmpty(), hits, ts, lastMove);
+                SharedPreferences.Editor ae = p.edit().putInt("moveHits", hits).putLong("lastMove", lastMove);
+                if (act == AutoTrip.START) {
+                    autoTripId = "auto_" + Long.toString(ts, 36);
+                    ae.putString("tripId", autoTripId).putString("alertTrip", autoTripId)
+                      .remove("zones").putLong("lastSpeedAlert", 0);
+                } else if (act == AutoTrip.END) {
+                    endTripId = cur;
+                    endTripTs = lastMove > 0 ? lastMove : ts;
+                }
+                ae.apply();
+                boolean noTrip = cur.isEmpty() && autoTripId == null;
+                if (noTrip && endTripId == null
+                        && ts - p.getLong("lastUploadOk", 0) < AutoTrip.IDLE_UPLOAD_MS
+                        && p.getInt("pending", 0) == 0) {
+                    return; // parado y sin viaje: no gastar bateria ni datos
+                }
+            }
+
             JSONObject live = new JSONObject();
             live.put("lat", loc.getLatitude());
             live.put("lng", loc.getLongitude());
@@ -252,12 +287,13 @@ public class GpsUploadService extends Service {
             JSONObject patch = new JSONObject();
             String tripId = p.getString("tripId", "");
             if (!tripId.isEmpty()) {
-                live.put("tripId", tripId);
+                if (endTripId == null) live.put("tripId", tripId);
                 JSONArray points = new JSONArray(p.getString("queue", "[]"));
                 points.put(pointRow(ts, loc.getLatitude(), loc.getLongitude(), speedKmh));
                 JSONObject trip = new JSONObject();
                 trip.put("id", tripId);
                 trip.put("startTs", ts);
+                if (endTripId != null) trip.put("endTs", endTripTs);
                 trip.put("points", points);
                 patch.put("trip", trip);
             }
@@ -304,6 +340,9 @@ public class GpsUploadService extends Service {
             if (!tripId.isEmpty()) {
                 saved.putString("queue", "[]")
                      .putInt("pending", 0);
+            }
+            if (endTripId != null) {
+                saved.putString("tripId", "").putInt("moveHits", 0);
             }
             saved.apply();
             if (alertsOk && alerts.length() > 0) notifyAdmins(p, sid, vehId, token, alerts);
