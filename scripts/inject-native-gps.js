@@ -68,6 +68,8 @@ const extraPerms = [
   'FOREGROUND_SERVICE_LOCATION',
   'POST_NOTIFICATIONS',
   'WAKE_LOCK',
+  'RECEIVE_BOOT_COMPLETED',
+  'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
   'RECEIVE_SMS',
   'SEND_SMS',
   'INTERNET'
@@ -108,6 +110,20 @@ if (smsReceiverPattern.test(mf)) {
   mf = mf.replace('</application>', smsReceiver + '\n    </application>');
 }
 console.log('SmsLocateReceiver verificado en Manifest');
+if (!mf.includes('mx.lallave.crm.plugins.BootReceiver')) {
+  const boot =
+    '\n        <receiver\n' +
+    '            android:name="mx.lallave.crm.plugins.BootReceiver"\n' +
+    '            android:exported="true">\n' +
+    '            <intent-filter>\n' +
+    '                <action android:name="android.intent.action.BOOT_COMPLETED" />\n' +
+    '                <action android:name="android.intent.action.QUICKBOOT_POWERON" />\n' +
+    '                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />\n' +
+    '            </intent-filter>\n' +
+    '        </receiver>';
+  mf = mf.replace('</application>', boot + '\n    </application>');
+  console.log('Registrado BootReceiver en Manifest');
+}
 if (!mf.includes('android.hardware.telephony')) {
   mf = mf.replace('<application', '<uses-feature android:name="android.hardware.telephony" android:required="false"/>\n    <application');
 }
